@@ -1,4 +1,4 @@
-# distutils: language = c++
+# distutils: language=c++
 
 from cython import boundscheck, wraparound
 import numpy as np
