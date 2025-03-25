@@ -25,6 +25,7 @@ def build():
             include_dirs=include_dirs,
             language="c++",
             extra_compile_args=["-std=c++11"],
+            extra_link_args=["-std=c++11"],
         ),
         compiler_directives={"binding": True, "language_level": 3},
     )
