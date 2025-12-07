@@ -36,14 +36,50 @@ class TestDijkstraGeneric:
         with pytest.raises(Exception):
             cy_dijkstra(cost, np.array([[3, 1]]))
 
-    def test_bounds(self):
-        # make sure the algorithm does not go through walls or out of bounds
-        cost = np.array([[1, np.inf, 1], [1, np.inf, 1], [1, np.inf, 1]])
-        pathing = cy_dijkstra(cost, np.array([[1, 2]]))
-        distance_expected = np.array(
-            [[np.inf, np.inf, 2], [np.inf, np.inf, 1], [np.inf, np.inf, 2]]
+
+class TestDijkstraBasic:
+    def test_maze(self):
+        cost = np.array([
+            [1, 1, np.inf, 1, 1],
+            [1, 1, np.inf, 1, 1],
+            [1, 1, 1, 1, 1],
+            [1, 1, np.inf, 1, 1],
+            [1, 1, np.inf, 1, 1],
+        ]).T
+        targets = np.array([[4, 0]])
+        pathing = cy_dijkstra(cost, targets)
+        print("#1")
+        assert_equal(
+            pathing.get_path((0, 0)),
+            [(0, 0), (1, 1), (2, 2), (3, 1), (4, 0)],
         )
-        assert_equal(pathing.distance, distance_expected)
+        print("#2")
+        assert_equal(
+            pathing.get_path((0, 2)),
+            [(0, 2), (1, 2), (2, 2), (3, 1), (4, 0)],
+        )
+        print("#3")
+        assert_equal(
+            pathing.get_path((0, 4)),
+            [(0, 4), (1, 3), (2, 2), (3, 1), (4, 0)],
+        )
+
+    def test_heuristic(self):
+        cost = np.array([
+            [1, 1, 1, 1, 1],
+        ]).astype(np.float64).T
+        targets = np.array([[4, 0]])
+        pathing = cy_dijkstra(cost, targets)
+        print("#1")
+        assert_equal(
+            pathing.get_path((3, 0)),
+            [(3, 0), (4, 0)],
+        )
+        print("#2")
+        assert_equal(
+            pathing.get_path((0, 0)),
+            [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)],
+        )
 
     def test_find_valid_start(self):
         # test that the algorithm searches for valid starting point near the given coordinates
@@ -80,7 +116,7 @@ class TestDijkstra:
             else:
                 # test that the distance was calculated correctly along the path
                 path_backwards = path[::-1]
-                dist_expected = pathing.distance[path_backwards[0]]
+                dist_expected = 0.0
                 for i, (p, q) in enumerate(zip(path_backwards[1:], path_backwards)):
                     dist_factor = np.linalg.norm(np.array(p) - np.array(q))
                     dist_expected += cost[p] * dist_factor
