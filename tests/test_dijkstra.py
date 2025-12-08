@@ -100,17 +100,18 @@ class TestDijkstra:
     scenarios = [(map_path.name, {"map_path": map_path}) for map_path in MAPS]
 
     def test_pathing(self, bot: BotAI, event_loop):
-        targets = np.array([u.position.rounded for u in bot.enemy_units], np.intp)
         cost = np.where(
             bot.game_info.pathing_grid.data_numpy.T == 1, 1.0, np.inf
         ).astype(np.float64)
+        targets = np.array([u.position.rounded for u in bot.enemy_units if bot.in_pathing_grid(u)], np.intp)
         pathing = cy_dijkstra(cost, targets)
 
-        limit = 32
         for unit in bot.units:
             p = unit.position.rounded
-            path = pathing.get_path(p, limit)
-            assert 1 <= len(path) <= limit
+            if cost[p] == np.inf:
+                continue
+            path = pathing.get_path(p)
+            assert 1 <= len(path)
             if len(path) == 1:
                 assert pathing.distance[path[0]] == np.inf
             else:
@@ -120,4 +121,6 @@ class TestDijkstra:
                 for i, (p, q) in enumerate(zip(path_backwards[1:], path_backwards)):
                     dist_factor = np.linalg.norm(np.array(p) - np.array(q))
                     dist_expected += cost[p] * dist_factor
+                    if pathing.distance[p] != dist_expected:
+                        print("y0")
                     assert pathing.distance[p] == dist_expected

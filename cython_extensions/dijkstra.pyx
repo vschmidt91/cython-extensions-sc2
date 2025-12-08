@@ -233,7 +233,7 @@ cdef class DijkstraPathing:
 
     @boundscheck(False)
     @wraparound(False)
-    cpdef get_path(self, (int, int) source, int limit=0):
+    cpdef get_path(self, (float, float) source, int limit=0, int max_distance=1):
         """
 
         Follow the path from a given source using the forward pointer grids.
@@ -257,7 +257,11 @@ cdef class DijkstraPathing:
             Py_ssize_t x2
             Py_ssize_t y2
         path = list[tuple[int, int]]()
-        x, y = source
+        x, y = self.get_closest_reachable_point(source, max_distance=max_distance)
+
+        # check that source is within bounds
+        if x < 0 or y < 0 or x >= self.distance.shape[0] or y >= self.distance.shape[1]:
+            return [(x, y)]
 
         self.compute_shortest_path(x, y)
         if limit == 0:
@@ -271,6 +275,44 @@ cdef class DijkstraPathing:
             path.append((x, y))
             x, y = self.forward_x[x, y], self.forward_y[x, y]
         return path
+
+    @boundscheck(False)
+    @wraparound(False)
+    cpdef (int, int) get_closest_reachable_point(self, (float, float) source, int max_distance):
+        """
+
+        Search the region for a point that can reach a target.
+
+        Parameters
+        ----------
+        source :
+            Start point as float coordinates.
+        limit :
+            Maximum distance between the source and returned point.
+
+        Returns
+        -------
+        tuple[int, int] :
+            The closest integer coordinates to the source with finite distance.
+
+        """
+        x0 = int(source[0])
+        y0 = int(source[1])
+
+        x_min = x0
+        y_min = y0
+        min_distance_squared = np.inf
+
+        for x in range(max(0, x0 - max_distance), min(self.distance.shape[0], x0 + max_distance + 1)):
+            for y in range(max(0, y0 - max_distance), min(self.distance.shape[1], y0 + max_distance + 1)):
+                if self.cost[x+1, y+1] < np.inf:
+                    distance_squared = (x - source[0]) ** 2 + (y - source[1]) ** 2
+                    if distance_squared < min_distance_squared:
+                        x_min = x
+                        y_min = y
+                        min_distance_squared = distance_squared
+
+        return x_min, y_min
 
 
 @boundscheck(False)
