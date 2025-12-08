@@ -121,6 +121,4 @@ class TestDijkstra:
                 for i, (p, q) in enumerate(zip(path_backwards[1:], path_backwards)):
                     dist_factor = np.linalg.norm(np.array(p) - np.array(q))
                     dist_expected += cost[p] * dist_factor
-                    if pathing.distance[p] != dist_expected:
-                        print("y0")
                     assert pathing.distance[p] == dist_expected

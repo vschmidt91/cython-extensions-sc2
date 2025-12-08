@@ -12,7 +12,11 @@ ctypedef cnp.float64_t DTYPE_t
 cdef Py_ssize_t[8] NEIGHBOURS_X = [-1, 1, 0, 0, -1, 1, -1, 1]
 cdef Py_ssize_t[8] NEIGHBOURS_Y = [0, 0, -1, 1, -1, -1, 1, 1]
 cdef DTYPE_t SQRT2 = np.sqrt(2)
+cdef DTYPE_t SQRT2_MINUS_1 = SQRT2 - 1.0
 cdef DTYPE_t[8] NEIGHBOURS_D = [1, 1, 1, 1, SQRT2, SQRT2, SQRT2, SQRT2]
+
+cdef inline DTYPE_t min_c(DTYPE_t a, DTYPE_t b):
+    return a if a < b else b
 
 cdef struct PriorityQueueItem:
     Py_ssize_t x
@@ -36,7 +40,7 @@ cdef class DijkstraPathing:
     cdef Py_ssize_t capacity
     cdef Py_ssize_t size
     cdef Py_ssize_t[:, :] indirection
-    cdef DTYPE_t[:, :] distance_lookahead
+    cdef public DTYPE_t[:, :] distance_lookahead
     cdef Py_ssize_t neighbour_count
     """Priority queue."""
     @boundscheck(False)
@@ -79,12 +83,23 @@ cdef class DijkstraPathing:
     @boundscheck(False)
     @wraparound(False)
     cdef DTYPE_t distance_key(self, Py_ssize_t x, Py_ssize_t y):
-        return min(self.distance[x, y], self.distance_lookahead[x, y])
+        return min_c(self.distance[x, y], self.distance_lookahead[x, y])
 
     @boundscheck(False)
     @wraparound(False)
-    cdef DTYPE_t heuristic(self, Py_ssize_t x, Py_ssize_t y, Py_ssize_t x0, Py_ssize_t y0):
+    cdef DTYPE_t heuristic_euclidean(self, Py_ssize_t x, Py_ssize_t y, Py_ssize_t x0, Py_ssize_t y0):
         return sqrt((x - x0) ** 2 + (y - y0) ** 2)
+
+    @boundscheck(False)
+    @wraparound(False)
+    cdef DTYPE_t heuristic_octile(self, Py_ssize_t x, Py_ssize_t y, Py_ssize_t x0, Py_ssize_t y0):
+        # Euclidean is slow. Use Octile distance for 8-connected grids.
+        cdef DTYPE_t dx = abs(x - x0)
+        cdef DTYPE_t dy = abs(y - y0)
+        if dx > dy:
+            return SQRT2_MINUS_1 * dy + dx
+        else:
+            return SQRT2_MINUS_1 * dx + dy
 
     @boundscheck(False)
     @wraparound(False)
@@ -98,6 +113,7 @@ cdef class DijkstraPathing:
             Py_ssize_t y2
             Py_ssize_t xb
             Py_ssize_t yb
+            cdef bint go_up
         if self.cost[x+1, y+1] == np.inf:
             return
         if self.distance_lookahead[x, y] != 0.0:
@@ -115,11 +131,27 @@ cdef class DijkstraPathing:
             self.distance_lookahead[x, y] = best
             self.forward_x[x, y] = xb
             self.forward_y[x, y] = yb
-        self.delete_item(x, y)
+
+
+        # Check consistency
+        d = self.distance_key(x, y)
+        h = self.heuristic_octile(x, y, x0, y0)
         if self.distance[x, y] != self.distance_lookahead[x, y]:
-            d = self.distance_key(x, y)
-            h = self.heuristic(x, y, x0, y0)
-            self.enqueue(PriorityQueueItem(x, y, d + h, d))
+            # Node is inconsistent, should be in heap
+            index = self.indirection[x, y]
+            item = PriorityQueueItem(x, y, d + h, d)
+            if index != -1:
+                go_up = compare(item, self.heap[index])
+                self.set_item(index, item)
+                if go_up:
+                    self.bubble_up(index)
+                else:
+                    self.bubble_down(index)
+            else:
+                self.enqueue(item)
+        else:
+            # Node is consistent, should NOT be in heap
+            self.delete_item(x, y)
 
     @boundscheck(False)
     @wraparound(False)
@@ -146,20 +178,6 @@ cdef class DijkstraPathing:
 
     @boundscheck(False)
     @wraparound(False)
-    cdef void decrease_key(self, Py_ssize_t index, DTYPE_t distance, DTYPE_t distance_lookahead):
-        cdef:
-            Py_ssize_t parent
-        self.heap[index].distance = distance
-        self.heap[index].distance_lookahead = distance_lookahead
-        while index != 0:
-            parent = (index - 1) // self.arity
-            if not compare(self.heap[index], self.heap[parent]):
-                break
-            self.swap(index, parent)
-            index = parent
-
-    @boundscheck(False)
-    @wraparound(False)
     cdef swap(self, Py_ssize_t i, Py_ssize_t j):
         self.indirection[self.heap[i].x, self.heap[i].y] = j
         self.indirection[self.heap[j].x, self.heap[j].y] = i
@@ -170,7 +188,9 @@ cdef class DijkstraPathing:
     cdef void delete_item(self, Py_ssize_t x, Py_ssize_t y):
         cdef index = self.indirection[x, y]
         if index != -1:
-            self.decrease_key(index, -np.inf, -np.inf)
+            self.heap[index].distance = -np.inf
+            self.heap[index].distance_lookahead = -np.inf
+            self.bubble_up(index)
             self.dequeue()
 
     @boundscheck(False)
@@ -181,47 +201,8 @@ cdef class DijkstraPathing:
 
     @boundscheck(False)
     @wraparound(False)
-    cdef PriorityQueueItem dequeue(self):
-        cdef:
-            PriorityQueueItem item
-            Py_ssize_t index
-            Py_ssize_t child
-            Py_ssize_t swap
-        if self.size <= 0:
-            raise Exception("queue is empty.")
-        self.size -= 1
-        item = self.heap[0]
-        self.set_item(0, self.heap[self.size])
-        self.indirection[item.x, item.y] = -1
-        index = 0
-        while True:
-            swap = index
-            i = self.arity * index + 1
-            for child in range(i, min(i + self.arity, self.size)):
-                if compare(self.heap[child], self.heap[swap]):
-                    swap = child
-            if swap != index:
-                self.swap(index, swap)
-                index = swap
-            else:
-                break
-        return item
-
-    @boundscheck(False)
-    @wraparound(False)
-    cdef enqueue(self, PriorityQueueItem item):
-        cdef:
-            Py_ssize_t index
-            Py_ssize_t parent
-        index = self.size
-        self.size += 1
-        if self.size > self.capacity:
-            self.capacity *= self.arity
-            self.heap = <PriorityQueueItem*>PyMem_Realloc(self.heap, self.capacity * sizeof(PriorityQueueItem))
-            if not self.heap:
-                raise MemoryError()
-        self.set_item(index, item)
-
+    cdef void bubble_up(self, Py_ssize_t index):
+        cdef Py_ssize_t parent
         while index != 0:
             parent = (index - 1) // self.arity
             if compare(self.heap[index], self.heap[parent]):
@@ -230,6 +211,56 @@ cdef class DijkstraPathing:
             else:
                 break
 
+    @boundscheck(False)
+    @wraparound(False)
+    cdef void bubble_down(self, Py_ssize_t index):
+        cdef Py_ssize_t child
+        cdef Py_ssize_t swap_idx
+        cdef Py_ssize_t i
+
+        while True:
+            swap_idx = index
+            i = self.arity * index + 1
+            # Optimized loop bounds calculation
+            if i >= self.size:
+                break
+
+            for child in range(i, min(i + self.arity, self.size)):
+                if compare(self.heap[child], self.heap[swap_idx]):
+                    swap_idx = child
+
+            if swap_idx != index:
+                self.swap(index, swap_idx)
+                index = swap_idx
+            else:
+                break
+
+    @boundscheck(False)
+    @wraparound(False)
+    cdef PriorityQueueItem dequeue(self):
+        cdef PriorityQueueItem item = self.heap[0]
+        self.size -= 1
+        self.set_item(0, self.heap[self.size])
+        self.indirection[item.x, item.y] = -1
+        self.bubble_down(0)
+        return item
+
+    @boundscheck(False)
+    @wraparound(False)
+    cdef enqueue(self, PriorityQueueItem item):
+        cdef:
+            Py_ssize_t index = self.size
+            PriorityQueueItem* new_heap
+        self.size += 1
+        if self.size > self.capacity:
+            self.capacity *= self.arity
+            new_heap = <PriorityQueueItem*>PyMem_Realloc(self.heap, self.capacity * sizeof(PriorityQueueItem))
+            if new_heap:
+                self.heap = new_heap
+            else:
+                raise MemoryError()
+        self.set_item(index, item)
+        self.bubble_up(index)
 
     @boundscheck(False)
     @wraparound(False)
@@ -261,6 +292,9 @@ cdef class DijkstraPathing:
 
         # check that source is within bounds
         if x < 0 or y < 0 or x >= self.distance.shape[0] or y >= self.distance.shape[1]:
+            return [(x, y)]
+
+        if self.cost[x+1, y+1] == np.inf:
             return [(x, y)]
 
         self.compute_shortest_path(x, y)
