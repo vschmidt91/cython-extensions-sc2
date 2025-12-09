@@ -40,6 +40,8 @@ class TestDijkstraGeneric:
         # make sure the algorithm does not go through walls or out of bounds
         cost = np.array([[1, np.inf, 1], [1, np.inf, 1], [1, np.inf, 1]])
         pathing = cy_dijkstra(cost, np.array([[1, 2]]))
+        path_expected = np.array([[1, 0]])
+        assert_equal(pathing.get_path((1, 0)), path_expected)
         distance_expected = np.array(
             [[np.inf, np.inf, 2], [np.inf, np.inf, 1], [np.inf, np.inf, 2]]
         )
