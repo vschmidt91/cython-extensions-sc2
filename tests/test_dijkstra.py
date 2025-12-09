@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from numpy.ma.testutils import assert_almost_equal
 from numpy.testing import assert_equal
 from sc2.bot_ai import BotAI
 
@@ -41,7 +42,7 @@ class TestDijkstraGeneric:
         cost = np.array([[1, np.inf, 1], [1, np.inf, 1], [1, np.inf, 1]])
         pathing = cy_dijkstra(cost, np.array([[1, 2]]))
         path_expected = np.array([[1, 0]])
-        assert_equal(pathing.get_path((1, 0)), path_expected)
+        assert_equal(pathing.get_path((1.0, 0.0)), path_expected)
         distance_expected = np.array(
             [[np.inf, np.inf, 2], [np.inf, np.inf, 1], [np.inf, np.inf, 2]]
         )
@@ -75,15 +76,15 @@ class TestDijkstra:
         limit = 32
         for unit in bot.units:
             p = unit.position.rounded
-            path = pathing.get_path(p, limit)
-            assert 1 <= len(path) <= limit
-            if len(path) == 1:
-                assert pathing.distance[path[0]] == np.inf
+            path = list(pathing.get_path(tuple(p), limit))
+            assert 0 <= len(path) <= limit
+            if len(path) == 0:
+                assert pathing.distance[p] == np.inf
             else:
                 # test that the distance was calculated correctly along the path
                 path_backwards = path[::-1]
-                dist_expected = pathing.distance[path_backwards[0]]
+                dist_expected = pathing.distance[path_backwards[0][0], path_backwards[0][1]]
                 for i, (p, q) in enumerate(zip(path_backwards[1:], path_backwards)):
                     dist_factor = np.linalg.norm(np.array(p) - np.array(q))
-                    dist_expected += cost[p] * dist_factor
-                    assert pathing.distance[p] == dist_expected
+                    dist_expected += cost[p[0], p[1]] * dist_factor
+                    assert_almost_equal(pathing.distance[p[0], p[1]], dist_expected)
