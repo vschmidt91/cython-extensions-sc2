@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from numpy.ma.testutils import assert_almost_equal
 from numpy.testing import assert_equal
 from sc2.bot_ai import BotAI
 
@@ -38,12 +39,12 @@ class TestDijkstraGeneric:
 
     def test_bounds(self):
         # make sure the algorithm does not go through walls or out of bounds
-        cost = np.array([[1, np.inf, 1], [1, np.inf, 1], [1, np.inf, 1]])
+        cost = np.array([[1, np.inf, 1], [1, np.inf, 1], [1, np.inf, 1]]).astype(np.float32)
         pathing = cy_dijkstra(cost, np.array([[1, 2]]))
         path_expected = np.array([[1, 0]])
         assert_equal(pathing.get_path((1, 0)), path_expected)
         distance_expected = np.array(
-            [[np.inf, np.inf, 2], [np.inf, np.inf, 1], [np.inf, np.inf, 2]]
+            [[np.inf, np.inf, 2], [np.inf, np.inf, 1], [np.inf, np.inf, 2]], dtype=np.float32
         )
         assert_equal(pathing.distance, distance_expected)
 
@@ -66,10 +67,10 @@ class TestDijkstra:
     scenarios = [(map_path.name, {"map_path": map_path}) for map_path in MAPS]
 
     def test_pathing(self, bot: BotAI, event_loop):
-        targets = np.array(list({u.position.rounded for u in bot.enemy_units}), np.intp)
+        targets = np.array([u.position.rounded for u in bot.enemy_units])
         cost = np.where(
             bot.game_info.pathing_grid.data_numpy.T == 1, 1.0, np.inf
-        ).astype(np.float64)
+        )
         pathing = cy_dijkstra(cost, targets)
 
         limit = 32
@@ -86,4 +87,4 @@ class TestDijkstra:
                 for i, (p, q) in enumerate(zip(path_backwards[1:], path_backwards)):
                     dist_factor = np.linalg.norm(np.array(p) - np.array(q))
                     dist_expected += cost[p] * dist_factor
-                    assert pathing.distance[p] == dist_expected
+                    assert_almost_equal(pathing.distance[p],  dist_expected, decimal=3)
