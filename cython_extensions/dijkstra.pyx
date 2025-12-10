@@ -7,9 +7,9 @@
 
 import numpy as np
 cimport numpy as cnp
+from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
 from numpy.math cimport INFINITY
 from libc.math cimport sqrt, round, M_SQRT2
-from libc.stdlib cimport malloc, free, realloc
 from libc.stdint cimport uint8_t
 
 # -----------------------------------------------------------------------------
@@ -20,10 +20,12 @@ ctypedef cnp.float32_t DTYPE_t
 ctypedef Py_ssize_t INDEX_t
 ctypedef uint8_t DIR_t
 
-cdef INDEX_t INITIAL_CAPACITY = 1024
+cdef INDEX_t MIN_CAPACITY = 1024
 cdef DIR_t NO_DIRECTION = 255
 cdef INDEX_t NO_INDEX = -1
-cdef INDEX_t MEMORY_ERROR = -1
+cdef INDEX_t[8] OFFSET_X = [-1, 1, 0, 0, -1, -1, 1, 1]
+cdef INDEX_t[8] OFFSET_Y = [0, 0, -1, 1, -1, 1, -1, 1]
+cdef DTYPE_t[8] COST_DIRECTION = [1.0, 1.0, 1.0, 1.0, M_SQRT2, M_SQRT2, M_SQRT2, M_SQRT2]
 
 # -----------------------------------------------------------------------------
 # Heap Operations
@@ -31,75 +33,74 @@ cdef INDEX_t MEMORY_ERROR = -1
 
 cdef inline void bubble_up(
     INDEX_t* index,
-    DTYPE_t* priorities,
+    DTYPE_t* priority,
     INDEX_t* indirection,
     INDEX_t i
-) noexcept nogil:
+):
     cdef INDEX_t parent
     cdef INDEX_t move_index = index[i]
-    cdef DTYPE_t move_priority = priorities[i]
+    cdef DTYPE_t move_priority = priority[i]
     while i > 0:
         parent = (i - 1) >> 2
-        if move_priority < priorities[parent]:
+        if move_priority < priority[parent]:
             index[i] = index[parent]
-            priorities[i] = priorities[parent]
+            priority[i] = priority[parent]
             indirection[index[i]] = i
             i = parent
         else:
             break
     index[i] = move_index
-    priorities[i] = move_priority
+    priority[i] = move_priority
     indirection[move_index] = i
 
 cdef inline void bubble_down(
     INDEX_t* index,
-    DTYPE_t* priorities,
+    DTYPE_t* priority,
     INDEX_t* indirection,
     INDEX_t i,
     INDEX_t size,
-) noexcept nogil:
+):
     cdef INDEX_t child, child0, min_child
     cdef INDEX_t move_index = index[i]
-    cdef DTYPE_t move_priority = priorities[i]
+    cdef DTYPE_t move_priority = priority[i]
     while True:
         child0 = (i << 2) + 1
         if child0 >= size:
             break
         min_child = child0
         child = child0 + 1
-        if child < size and priorities[child] < priorities[min_child]:
+        if child < size and priority[child] < priority[min_child]:
             min_child = child
         child = child0 + 2
-        if child < size and priorities[child] < priorities[min_child]:
+        if child < size and priority[child] < priority[min_child]:
             min_child = child
         child = child0 + 3
-        if child < size and priorities[child] < priorities[min_child]:
+        if child < size and priority[child] < priority[min_child]:
             min_child = child
-        if priorities[min_child] < move_priority:
+        if priority[min_child] < move_priority:
             index[i] = index[min_child]
-            priorities[i] = priorities[min_child]
+            priority[i] = priority[min_child]
             indirection[index[i]] = i
             i = min_child
         else:
             break
     index[i] = move_index
-    priorities[i] = move_priority
+    priority[i] = move_priority
     indirection[move_index] = i
 
-cdef inline bint ensure_capacity(
+cdef inline void grow_heap(
     INDEX_t** index,
-    DTYPE_t** priorities,
+    DTYPE_t** priority,
     INDEX_t* capacity
-) noexcept nogil:
+):
     cdef INDEX_t new_capacity = capacity[0] * 2
-    cdef INDEX_t* new_index = <INDEX_t*>realloc(index[0], new_capacity * sizeof(INDEX_t))
-    cdef DTYPE_t* new_priorities = <DTYPE_t*>realloc(priorities[0], new_capacity * sizeof(DTYPE_t))
-    if not new_index or not new_priorities:
-        return False
+    cdef INDEX_t* new_index = <INDEX_t*>PyMem_Realloc(index[0], new_capacity * sizeof(INDEX_t))
+    cdef DTYPE_t* new_priority = <DTYPE_t*>PyMem_Realloc(priority[0], new_capacity * sizeof(DTYPE_t))
+    if not new_index or not new_priority:
+        raise MemoryError("Heap allocation failed in cy_dijkstra.")
     index[0] = new_index
-    priorities[0] = new_priorities
+    priority[0] = new_priority
     capacity[0] = new_capacity
-    return True
 
 # -----------------------------------------------------------------------------
 # Core Algorithm
@@ -119,52 +120,51 @@ cdef void dijkstra_core(
 ):
 
     cdef:
-        INDEX_t i, neighbor, k
+        INDEX_t i, neighbour, k
         DTYPE_t d, alternative
         INDEX_t* index = index_ptr[0]
-        DTYPE_t* priorities = priority_ptr[0]
+        DTYPE_t* priority = priority_ptr[0]
         INDEX_t size = size_ptr[0]
         INDEX_t[8] offsets = [-stride, stride, -1, 1, -stride - 1, -stride + 1, stride - 1, stride + 1]
-        DTYPE_t[8] step_costs = [1.0, 1.0, 1.0, 1.0, M_SQRT2, M_SQRT2, M_SQRT2, M_SQRT2]
 
-    while size > 0 and priorities[0] < distance[start]:
+    while size > 0 and priority[0] < distance[start]:
 
         # pop minimum
         i = index[0]
-        d = priorities[0]
+        d = priority[0]
         indirection[i] = NO_INDEX
         size -= 1
         if size > 0:
             index[0] = index[size]
-            priorities[0] = priorities[size]
+            priority[0] = priority[size]
             indirection[index[0]] = 0
-            bubble_down(index, priorities, indirection, 0, size)
+            bubble_down(index, priority, indirection, 0, size)
 
         # iterate neighbours
         for k in range(8):
-            neighbor = i + offsets[k]
-            alternative = d + step_costs[k] * cost[neighbor]
-            if alternative < distance[neighbor]:
-                distance[neighbor] = alternative
-                direction[neighbor] = <DIR_t>k
-                if indirection[neighbor] != NO_INDEX:
-                    # decrease key
-                    priorities[indirection[neighbor]] = alternative
-                    bubble_up(index, priorities, indirection, indirection[neighbor])
+            neighbour = i + offsets[k]
+            alternative = d + COST_DIRECTION[k] * cost[neighbour]
+            if alternative < distance[neighbour]:
+                distance[neighbour] = alternative
+                direction[neighbour] = <DIR_t>k
+
+                if indirection[neighbour] != NO_INDEX:
+                    # node already in heap, decrease key
+                    priority[indirection[neighbour]] = alternative
+                    bubble_up(index, priority, indirection, indirection[neighbour])
+
                 else:
                     # dynamic resize
                     if size >= capacity_ptr[0]:
-                        if ensure_capacity(index_ptr, priority_ptr, capacity_ptr):
-                            index = index_ptr[0]
-                            priorities = priority_ptr[0]
-                        else:
-                            size_ptr[0] = MEMORY_ERROR
-                            return
+                        grow_heap(index_ptr, priority_ptr, capacity_ptr)
+                        index = index_ptr[0]
+                        priority = priority_ptr[0]
+
                     # enqueue
-                    index[size] = neighbor
-                    priorities[size] = alternative
-                    indirection[neighbor] = size
-                    bubble_up(index, priorities, indirection, size)
+                    index[size] = neighbour
+                    priority[size] = alternative
+                    indirection[neighbour] = size
+                    bubble_up(index, priority, indirection, size)
                     size += 1
 
     size_ptr[0] = size
@@ -180,139 +180,102 @@ cdef class DijkstraOutput:
     cdef INDEX_t* index
     cdef DTYPE_t* priority
     cdef INDEX_t capacity
-
     cdef DTYPE_t[:, ::1] cost
     cdef INDEX_t[:, ::1] indirection
     cdef INDEX_t size
-    cdef INDEX_t width
+    cdef INDEX_t stride
 
     def __cinit__(self,
-                  DTYPE_t[:, :] cost,
-                  INDEX_t[:, :] targets):
-        cdef:
-            INDEX_t x, y, flat_idx
-            DTYPE_t c
-            INDEX_t n_targets = targets.shape[0]
-
+                  DTYPE_t[:, ::1] cost,
+                  INDEX_t[:, ::1] targets):
+        cdef INDEX_t num_targets = targets.shape[0]
         self.cost = np.pad(cost, 1, "constant", constant_values=INFINITY)
-        self.width = self.cost.shape[1]
-
+        self.stride = self.cost.shape[1]
         self.direction = np.full_like(self.cost, NO_DIRECTION, dtype=np.uint8)
         self.indirection = np.full_like(self.cost, NO_INDEX, dtype=np.intp)
         self.distance = np.full_like(self.cost, INFINITY)
-
-        self.capacity = INITIAL_CAPACITY
-        if n_targets * 2 > self.capacity:
-            self.capacity = n_targets * 2
-
-        self.index = <INDEX_t*>malloc(self.capacity * sizeof(INDEX_t))
-        self.priority = <DTYPE_t*>malloc(self.capacity * sizeof(DTYPE_t))
-
+        self.capacity = max(MIN_CAPACITY, 2 * num_targets)
+        self.size = 0
+        self.index = <INDEX_t*>PyMem_Malloc(self.capacity * sizeof(INDEX_t))
+        self.priority = <DTYPE_t*>PyMem_Malloc(self.capacity * sizeof(DTYPE_t))
         if not self.index or not self.priority:
             raise MemoryError("Could not allocate heap memory")
+        for k in range(num_targets):
+            self._add_target(self.stride * (targets[k, 0] + 1) + (targets[k, 1] + 1))
 
-        self.size = 0
-
+    cdef void _add_target(self, INDEX_t i):
         cdef INDEX_t* indirection = &self.indirection[0,0]
         cdef DTYPE_t* distance = &self.distance[0,0]
-        cdef DTYPE_t* cost_flat = &self.cost[0,0]
-
-        for i in range(n_targets):
-            x = targets[i, 0] + 1
-            y = targets[i, 1] + 1
-            flat_idx = x * self.width + y
-            c = cost_flat[flat_idx]
-            if c == INFINITY:
-                continue
-            self.index[self.size] = flat_idx
-            self.priority[self.size] = c
-            indirection[flat_idx] = self.size
-            distance[flat_idx] = c
-            self.size += 1
-            bubble_up(self.index, self.priority, indirection, self.size - 1)
+        cdef DTYPE_t* cost = &self.cost[0,0]
+        c = cost[i]
+        if c == INFINITY:
+            return
+        self.index[self.size] = i
+        self.priority[self.size] = c
+        indirection[i] = self.size
+        distance[i] = c
+        bubble_up(self.index, self.priority, indirection, self.size)
+        self.size += 1
 
     def __dealloc__(self):
         if self.index is not NULL:
-            free(self.index)
+            PyMem_Free(self.index)
         if self.priority is not NULL:
-            free(self.priority)
+            PyMem_Free(self.priority)
 
     cpdef get_path(self, (float, float) source, int limit=0, int max_distance=1):
-        cdef INDEX_t i, j, x0, y0, flat_idx
-        cdef DIR_t* direction = &self.direction[0, 0]
-
-        i, j = self.get_closest_reachable_point(source, max_distance=max_distance)
-        x0 = i + 1
-        y0 = j + 1
-
-        if x0 < 0 or y0 < 0 or x0 >= self.distance.shape[0] or y0 >= self.distance.shape[1]:
-            return [(i, j)]
-
-        if self.cost[x0, y0] == INFINITY:
-            return [(i, j)]
-
-        flat_idx = x0 * self.width + y0
-
-        # Run Dijkstra Core
+        # find start integer coordinates
+        cdef INDEX_t x0, y0
+        x0, y0 = self._find_starting_point(source, max_distance=max_distance)
+        if x0 < 0 or y0 < 0 or x0 >= self.distance.shape[0] or y0 >= self.distance.shape[1] or self.cost[x0, y0] == INFINITY:
+            return [(x0 - 1, y0 - 1)]
         dijkstra_core(
             &self.index,
             &self.priority,
             &self.capacity,
             &self.indirection[0, 0],
             &self.size,
-            flat_idx,
+            x0 * self.stride + y0,
             &self.distance[0, 0],
             &self.cost[0, 0],
-            direction,
-            self.width
+            &self.direction[0, 0],
+            self.stride
         )
+        return self._follow_directions(x0, y0, limit)
 
-        if self.size == MEMORY_ERROR:
-            raise MemoryError("Heap allocation failed during pathfinding")
-
+    cdef _follow_directions(self, INDEX_t x, INDEX_t y, INDEX_t limit):
         if limit == 0:
             limit = self.distance.size
-
-        # Reconstruct path
         path = []
-        cdef INDEX_t curr_flat = flat_idx
-        cdef INDEX_t px = i
-        cdef INDEX_t py = j
-        cdef DIR_t move_direction
-
-        # Local lookup to decode direction (must match loop order in core)
-        cdef INDEX_t[8] offsets = [-self.width, self.width, -1, 1, -self.width - 1, -self.width + 1, self.width - 1, self.width + 1]
-        cdef INDEX_t[8] offsets_x = [-1, 1, 0, 0, -1, -1, 1, 1]
-        cdef INDEX_t[8] offsets_y = [0, 0, -1, 1, -1, 1, -1, 1]
-
         while len(path) < limit:
-            path.append((px, py))
-            move_direction = direction[curr_flat]
-            if move_direction == NO_DIRECTION:
+            path.append((x - 1, y - 1))
+            k = self.direction[x, y]
+            if k == NO_DIRECTION:
                 break
-            px -= offsets_x[move_direction]
-            py -= offsets_y[move_direction]
-            curr_flat -= offsets[move_direction]
+            x -= OFFSET_X[k]
+            y -= OFFSET_Y[k]
         return path
 
-    cpdef (INDEX_t, INDEX_t) get_closest_reachable_point(self, (float, float) source, int max_distance):
-        cdef INDEX_t x0 = <INDEX_t>round(source[0])
-        cdef INDEX_t y0 = <INDEX_t>round(source[1])
+    cdef (INDEX_t, INDEX_t) _find_starting_point(self, (float, float) source, int max_distance):
+        cdef DTYPE_t fx0 = source[0] + 1
+        cdef DTYPE_t fy0 = source[1] + 1
+        cdef INDEX_t x0 = <INDEX_t>round(fx0)
+        cdef INDEX_t y0 = <INDEX_t>round(fy0)
         cdef INDEX_t x_min = x0
         cdef INDEX_t y_min = y0
-        cdef DTYPE_t min_distance_squared = INFINITY
-        cdef DTYPE_t distance_squared
+        cdef DTYPE_t min_d2 = INFINITY
+        cdef DTYPE_t d2
         cdef INDEX_t x, y
-        cdef INDEX_t x_start = max(0, x0 - max_distance)
-        cdef INDEX_t x_end = min(self.distance.shape[0] - 2, x0 + max_distance + 1)
-        cdef INDEX_t y_start = max(0, y0 - max_distance)
-        cdef INDEX_t y_end = min(self.distance.shape[1] - 2, y0 + max_distance + 1)
+        cdef INDEX_t x_start = max(1, x0 - max_distance)
+        cdef INDEX_t x_end = min(self.distance.shape[0] - 1, x0 + max_distance + 1)
+        cdef INDEX_t y_start = max(1, y0 - max_distance)
+        cdef INDEX_t y_end = min(self.distance.shape[1] - 1, y0 + max_distance + 1)
         for x in range(x_start, x_end):
             for y in range(y_start, y_end):
-                if self.cost[x+1, y+1] != INFINITY:
-                    distance_squared = (x - source[0])**2 + (y - source[1])**2
-                    if distance_squared < min_distance_squared:
-                        min_distance_squared = distance_squared
+                if self.cost[x, y] != INFINITY:
+                    d2 = (x - fx0)**2 + (y - fy0)**2
+                    if d2 < min_d2:
+                        min_d2 = d2
                         x_min = x
                         y_min = y
         return x_min, y_min
