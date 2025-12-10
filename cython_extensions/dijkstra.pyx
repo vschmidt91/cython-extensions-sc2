@@ -10,18 +10,18 @@ cimport numpy as cnp
 from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
 from numpy.math cimport INFINITY
 from libc.math cimport sqrt, round, M_SQRT2
-from libc.stdint cimport uint8_t
+from libc.stdint cimport int8_t
 
 # -----------------------------------------------------------------------------
 # Types & Constants
 # -----------------------------------------------------------------------------
 
 ctypedef cnp.float32_t DTYPE_t
-ctypedef Py_ssize_t INDEX_t
-ctypedef uint8_t DIR_t
+ctypedef cnp.int32_t INDEX_t
+ctypedef int8_t DIR_t
 
 cdef INDEX_t MIN_CAPACITY = 1024
-cdef DIR_t NO_DIRECTION = 255
+cdef DIR_t NO_DIRECTION = -1
 cdef INDEX_t NO_INDEX = -1
 cdef INDEX_t[8] OFFSET_X = [-1, 1, 0, 0, -1, -1, 1, 1]
 cdef INDEX_t[8] OFFSET_Y = [0, 0, -1, 1, -1, 1, -1, 1]
@@ -41,7 +41,7 @@ cdef inline void bubble_up(
     cdef INDEX_t move_index = index[i]
     cdef DTYPE_t move_priority = priority[i]
     while i > 0:
-        parent = (i - 1) >> 2
+        parent = (i - 1) >> 1
         if move_priority < priority[parent]:
             index[i] = index[parent]
             priority[i] = priority[parent]
@@ -60,47 +60,39 @@ cdef inline void bubble_down(
     INDEX_t i,
     INDEX_t size,
 ):
-    cdef INDEX_t child, child0, min_child
+    cdef INDEX_t child
     cdef INDEX_t move_index = index[i]
     cdef DTYPE_t move_priority = priority[i]
-    while True:
-        child0 = (i << 2) + 1
-        if child0 >= size:
+    cdef INDEX_t half_size = size >> 1
+    while i < half_size:
+        child = (i << 1) + 1
+        if child + 1 < size and priority[child + 1] < priority[child]:
+            child += 1
+        if move_priority <= priority[child]:
             break
-        min_child = child0
-        child = child0 + 1
-        if child < size and priority[child] < priority[min_child]:
-            min_child = child
-        child = child0 + 2
-        if child < size and priority[child] < priority[min_child]:
-            min_child = child
-        child = child0 + 3
-        if child < size and priority[child] < priority[min_child]:
-            min_child = child
-        if priority[min_child] < move_priority:
-            index[i] = index[min_child]
-            priority[i] = priority[min_child]
-            indirection[index[i]] = i
-            i = min_child
-        else:
-            break
+        index[i] = index[child]
+        priority[i] = priority[child]
+        indirection[index[i]] = i
+        i = child
     index[i] = move_index
     priority[i] = move_priority
     indirection[move_index] = i
 
 cdef inline void grow_heap(
-    INDEX_t** index,
-    DTYPE_t** priority,
-    INDEX_t* capacity
-):
-    cdef INDEX_t new_capacity = capacity[0] * 2
-    cdef INDEX_t* new_index = <INDEX_t*>PyMem_Realloc(index[0], new_capacity * sizeof(INDEX_t))
-    cdef DTYPE_t* new_priority = <DTYPE_t*>PyMem_Realloc(priority[0], new_capacity * sizeof(DTYPE_t))
-    if not new_index or not new_priority:
+    INDEX_t** index_ptr,
+    DTYPE_t** priority_ptr,
+    INDEX_t* capacity_ptr
+) except *:
+    cdef INDEX_t new_capacity = capacity_ptr[0] * 2
+    cdef INDEX_t* new_index = <INDEX_t*>PyMem_Realloc(index_ptr[0], new_capacity * sizeof(INDEX_t))
+    if not new_index:
         raise MemoryError("Heap allocation failed in cy_dijkstra.")
-    index[0] = new_index
-    priority[0] = new_priority
-    capacity[0] = new_capacity
+    index_ptr[0] = new_index
+    cdef DTYPE_t* new_priority = <DTYPE_t*>PyMem_Realloc(priority_ptr[0], new_capacity * sizeof(DTYPE_t))
+    if not new_priority:
+        raise MemoryError("Heap allocation failed in cy_dijkstra.")
+    priority_ptr[0] = new_priority
+    capacity_ptr[0] = new_capacity
 
 # -----------------------------------------------------------------------------
 # Core Algorithm
@@ -159,7 +151,6 @@ cdef void dijkstra_core(
                         grow_heap(index_ptr, priority_ptr, capacity_ptr)
                         index = index_ptr[0]
                         priority = priority_ptr[0]
-
                     # enqueue
                     index[size] = neighbour
                     priority[size] = alternative
@@ -191,8 +182,8 @@ cdef class DijkstraOutput:
         cdef INDEX_t num_targets = targets.shape[0]
         self.cost = np.pad(cost, 1, "constant", constant_values=INFINITY)
         self.stride = self.cost.shape[1]
-        self.direction = np.full_like(self.cost, NO_DIRECTION, dtype=np.uint8)
-        self.indirection = np.full_like(self.cost, NO_INDEX, dtype=np.intp)
+        self.direction = np.full_like(self.cost, NO_DIRECTION, dtype=np.int8)
+        self.indirection = np.full_like(self.cost, NO_INDEX, dtype=np.int32)
         self.distance = np.full_like(self.cost, INFINITY)
         self.capacity = max(MIN_CAPACITY, 2 * num_targets)
         self.size = 0
@@ -218,16 +209,14 @@ cdef class DijkstraOutput:
         self.size += 1
 
     def __dealloc__(self):
-        if self.index is not NULL:
-            PyMem_Free(self.index)
-        if self.priority is not NULL:
-            PyMem_Free(self.priority)
+        PyMem_Free(self.index)
+        PyMem_Free(self.priority)
 
     cpdef get_path(self, (float, float) source, int limit=0, int max_distance=1):
         # find start integer coordinates
         cdef INDEX_t x0, y0
         x0, y0 = self._find_starting_point(source, max_distance=max_distance)
-        if x0 < 0 or y0 < 0 or x0 >= self.distance.shape[0] or y0 >= self.distance.shape[1] or self.cost[x0, y0] == INFINITY:
+        if x0 < 0 or y0 < 0 or x0 >= self.cost.shape[0] or y0 >= self.cost.shape[1] or self.cost[x0, y0] == INFINITY:
             return [(x0 - 1, y0 - 1)]
         dijkstra_core(
             &self.index,
@@ -286,7 +275,7 @@ cpdef DijkstraOutput cy_dijkstra(
     bint checks_enabled = True,
 ):
     cdef DTYPE_t[:, ::1] cost_array = np.ascontiguousarray(cost, dtype=np.float32)
-    cdef INDEX_t[:, ::1] target_array = np.ascontiguousarray(targets, dtype=np.intp)
+    cdef INDEX_t[:, ::1] target_array = np.ascontiguousarray(targets, dtype=np.int32)
     if checks_enabled:
         if np.any(np.less_equal(cost_array, 0.0)):
             raise Exception("invalid cost: entries must be strictly positive")
