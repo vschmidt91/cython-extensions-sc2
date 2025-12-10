@@ -52,14 +52,31 @@ cdef inline void bubble_up(
     INDEX_t index
 ) noexcept nogil:
     cdef INDEX_t parent
-    while index != 0:
+    # Capture the moving node (the "hole" is now at 'index')
+    cdef INDEX_t moving_node_idx = heap_indices[index]
+    cdef DTYPE_t moving_node_dist = heap_distances[index]
+
+    while index > 0:
         # Bitwise shift for division by 4 (arity)
         parent = (index - 1) >> 2
-        if heap_distances[index] < heap_distances[parent]:
-            swap(heap_indices, heap_distances, indices_ptr, index, parent)
+
+        if moving_node_dist < heap_distances[parent]:
+            # Move parent down into the hole
+            heap_indices[index] = heap_indices[parent]
+            heap_distances[index] = heap_distances[parent]
+
+            # Update parent's lookup immediately
+            indices_ptr[heap_indices[index]] = index
+
+            # The hole moves up to the parent
             index = parent
         else:
             break
+
+    # Place the moving node into the final hole
+    heap_indices[index] = moving_node_idx
+    heap_distances[index] = moving_node_dist
+    indices_ptr[moving_node_idx] = index
 
 cdef inline void bubble_down(
     INDEX_t* heap_indices,
@@ -68,37 +85,51 @@ cdef inline void bubble_down(
     INDEX_t index,
     INDEX_t size,
 ) noexcept nogil:
-    cdef INDEX_t child, child0, next_idx
+    cdef INDEX_t child, child0, min_child
+    # Capture the moving node (the "hole" is now at 'index')
+    cdef INDEX_t moving_node_idx = heap_indices[index]
+    cdef DTYPE_t moving_node_dist = heap_distances[index]
+
     while True:
-        next_idx = index
         # Bitwise shift for multiplication by 4
         child0 = (index << 2) + 1
 
-        # Unrolled check for children (Arity 4)
-        if child0 < size:
-            if heap_distances[child0] < heap_distances[next_idx]:
-                next_idx = child0
+        if child0 >= size:
+            break
 
-            child = child0 + 1
-            if child < size:
-                if heap_distances[child] < heap_distances[next_idx]:
-                    next_idx = child
+        # Find smallest child (Arity 4)
+        min_child = child0
 
-                child = child0 + 2
-                if child < size:
-                    if heap_distances[child] < heap_distances[next_idx]:
-                        next_idx = child
+        child = child0 + 1
+        if child < size and heap_distances[child] < heap_distances[min_child]:
+            min_child = child
 
-                    child = child0 + 3
-                    if child < size:
-                        if heap_distances[child] < heap_distances[next_idx]:
-                            next_idx = child
+        child = child0 + 2
+        if child < size and heap_distances[child] < heap_distances[min_child]:
+            min_child = child
 
-        if next_idx != index:
-            swap(heap_indices, heap_distances, indices_ptr, index, next_idx)
-            index = next_idx
+        child = child0 + 3
+        if child < size and heap_distances[child] < heap_distances[min_child]:
+            min_child = child
+
+        # Check if we need to swap with the smallest child
+        if heap_distances[min_child] < moving_node_dist:
+            # Move child up into the hole
+            heap_indices[index] = heap_indices[min_child]
+            heap_distances[index] = heap_distances[min_child]
+
+            # Update child's lookup immediately
+            indices_ptr[heap_indices[index]] = index
+
+            # The hole moves down to the child
+            index = min_child
         else:
             break
+
+    # Place the moving node into the final hole
+    heap_indices[index] = moving_node_idx
+    heap_distances[index] = moving_node_dist
+    indices_ptr[moving_node_idx] = index
 
 # -----------------------------------------------------------------------------
 # Core Algorithm
