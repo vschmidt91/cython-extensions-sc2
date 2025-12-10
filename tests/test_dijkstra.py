@@ -66,7 +66,7 @@ class TestDijkstra:
     scenarios = [(map_path.name, {"map_path": map_path}) for map_path in MAPS]
 
     def test_pathing(self, bot: BotAI, event_loop):
-        targets = np.array([u.position.rounded for u in bot.enemy_units], np.intp)
+        targets = np.array(list({u.position.rounded for u in bot.enemy_units}), np.intp)
         cost = np.where(
             bot.game_info.pathing_grid.data_numpy.T == 1, 1.0, np.inf
         ).astype(np.float64)

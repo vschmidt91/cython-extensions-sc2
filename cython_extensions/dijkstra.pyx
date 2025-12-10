@@ -1,3 +1,9 @@
+# cython: language_level=3
+# cython: boundscheck=False
+# cython: wraparound=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+
 import numpy as np
 from cython import boundscheck, wraparound
 
@@ -8,100 +14,168 @@ from libc.math cimport sqrt
 DEF HEAP_ARITY = 4
 
 ctypedef cnp.float64_t DTYPE_t
+ctypedef Py_ssize_t INDEX_t
 
-cdef Py_ssize_t[8] NEIGHBOURS_X = [-1, 1, 0, 0, -1, 1, -1, 1]
-cdef Py_ssize_t[8] NEIGHBOURS_Y = [0, 0, -1, 1, -1, -1, 1, 1]
+cdef INDEX_t[8] NEIGHBOURS_X = [-1, 1, 0, 0, -1, 1, -1, 1]
+cdef INDEX_t[8] NEIGHBOURS_Y = [0, 0, -1, 1, -1, -1, 1, 1]
 cdef DTYPE_t SQRT2 = np.sqrt(2)
 cdef DTYPE_t[8] NEIGHBOURS_D = [1, 1, 1, 1, SQRT2, SQRT2, SQRT2, SQRT2]
 
 
 cdef struct PriorityQueueItem:
-    Py_ssize_t x, y
+    INDEX_t x, y
     DTYPE_t distance
 
+cdef inline void swap(
+    PriorityQueueItem* heap,
+    INDEX_t[:, :] indices,
+    INDEX_t i,
+    INDEX_t j,
+) noexcept nogil:
+    cdef PriorityQueueItem item_i = heap[j]
+    cdef PriorityQueueItem item_j = heap[i]
+    heap[i] = item_i
+    heap[j] = item_j
+    indices[item_i.x, item_i.y] = i
+    indices[item_j.x, item_j.y] = j
 
-@boundscheck(False)
-@wraparound(False)
-cdef inline void bubble_up(PriorityQueueItem* heap, Py_ssize_t[:, :] indices, Py_ssize_t index):
-    cdef Py_ssize_t parent
+
+cdef inline void bubble_up(
+    PriorityQueueItem* heap,
+    INDEX_t[:, :] indices,
+    INDEX_t arity,
+    INDEX_t index
+) noexcept nogil:
+    cdef INDEX_t parent
     while index != 0:
-        parent = (index - 1) // HEAP_ARITY
+        parent = (index - 1) // arity
         if heap[index].distance < heap[parent].distance:
-            heap[index], heap[parent] = heap[parent], heap[index]
-            indices[heap[index].x, heap[index].y] = index
-            indices[heap[parent].x, heap[parent].y] = parent
+            swap(heap, indices, index, parent)
             index = parent
         else:
             break
 
-@boundscheck(False)
-@wraparound(False)
-cdef inline void bubble_down(PriorityQueueItem* heap, Py_ssize_t[:, :] indices, Py_ssize_t size, Py_ssize_t index):
-    cdef Py_ssize_t swap, child, i
+cdef inline void bubble_down(
+    PriorityQueueItem* heap,
+    INDEX_t[:, :] indices,
+    INDEX_t arity,
+    INDEX_t index,
+    INDEX_t size,
+) noexcept nogil:
+    cdef INDEX_t child, child0, next
     while True:
-        swap = index
-        i = HEAP_ARITY * index + 1
-        for child in range(i, min(i + HEAP_ARITY, size)):
-            if heap[child].distance < heap[swap].distance:
-                swap = child
-        if swap != index:
-            heap[index], heap[swap] = heap[swap], heap[index]
-            indices[heap[index].x, heap[index].y] = index
-            indices[heap[swap].x, heap[swap].y] = swap
-            index = swap
+        next = index
+        child0 = arity * index + 1
+        for child in range(child0, min(size, child0 + arity)):
+            if heap[child].distance < heap[next].distance:
+                next = child
+        if next != index:
+            swap(heap, indices, index, next)
+            index = next
         else:
             break
 
+cdef INDEX_t dijkstra_core(
+    PriorityQueueItem* heap,
+    INDEX_t[:, :] indices,
+    INDEX_t arity,
+    INDEX_t size,
+    INDEX_t x0,
+    INDEX_t y0,
+    DTYPE_t[:, :] distance,
+    DTYPE_t[:, :] cost,
+    INDEX_t[:, :] forward_x,
+    INDEX_t[:, :] forward_y,
+) noexcept nogil:
+
+    cdef:
+        INDEX_t x, y, x2, y2
+        DTYPE_t d, alternative
+
+    while size != 0 and heap[0].distance < distance[x0, y0]:
+        # dequeue
+        x = heap[0].x
+        y = heap[0].y
+        d = heap[0].distance
+        indices[x, y] = -1
+        size -= 1
+        heap[0] = heap[size]
+        indices[heap[0].x, heap[0].y] = 0
+        bubble_down(heap, indices, arity, 0, size)
+        if d > distance[x, y]:
+            continue
+        for k in range(8):
+            x2 = x + NEIGHBOURS_X[k]
+            y2 = y + NEIGHBOURS_Y[k]
+            alternative = distance[x, y] + NEIGHBOURS_D[k] * cost[x2, y2]
+            if alternative < distance[x2, y2]:
+                distance[x2, y2] = alternative
+                forward_x[x2, y2] = x
+                forward_y[x2, y2] = y
+                if indices[x2, y2] != -1:
+                    # decrease_key
+                    heap[indices[x2, y2]].distance = alternative
+                    bubble_up(heap, indices, arity, indices[x2, y2])
+                else:
+                    # enqueue
+                    if size >= distance.shape[0] * distance.shape[1]:
+                        return size
+                    size += 1
+                    heap[size - 1] = PriorityQueueItem(x2, y2, alternative)
+                    indices[x2, y2] = size - 1
+                    bubble_up(heap, indices, arity, size - 1)
+    return size
+
+
 
 cdef class DijkstraOutput:
-    cdef public Py_ssize_t[:, :] forward_x
+    cdef public INDEX_t[:, :] forward_x
     """Forward pointer grid (x-coordinates)."""
-    cdef public Py_ssize_t[:, :] forward_y
+    cdef public INDEX_t[:, :] forward_y
     """Forward pointer grid (y-coordinates)."""
     cdef public DTYPE_t[:, :] distance
     """Distance grid."""
     cdef PriorityQueueItem* heap
     cdef DTYPE_t[:, :] cost
-    cdef Py_ssize_t[:, :] targets
-    cdef Py_ssize_t[:, :] indices
-    cdef Py_ssize_t capacity
-    cdef Py_ssize_t size
+    cdef INDEX_t[:, :] targets
+    cdef INDEX_t[:, :] indices
+    cdef INDEX_t arity
+    cdef INDEX_t size
     def __cinit__(self,
                   DTYPE_t[:, :] cost,
-                  Py_ssize_t[:, :] targets):
+                  INDEX_t[:, :] targets):
         cdef:
-            Py_ssize_t x, y
+            INDEX_t x, y
             DTYPE_t c
         self.cost = np.pad(cost, 1, "constant", constant_values=np.inf)
         self.targets = targets
-        self.forward_x = np.full_like(cost, -1, np.intp)
-        self.forward_y = np.full_like(cost, -1, np.intp)
-        self.indices = np.full_like(cost, -1, np.intp)
-        self.distance = np.full_like(cost, np.inf)
+        self.forward_x = np.full_like(self.cost, -1, np.intp)
+        self.forward_y = np.full_like(self.cost, -1, np.intp)
+        self.indices = np.full_like(self.cost, -1, np.intp)
+        self.distance = np.full_like(self.cost, np.inf)
 
-        self.capacity = targets.shape[0]
-        self.heap = <PriorityQueueItem*>PyMem_Malloc(self.capacity * sizeof(PriorityQueueItem))
-        if not self.heap:
-            raise MemoryError()
-        self.size = self.capacity
+        self.arity = HEAP_ARITY
+        self.heap = <PriorityQueueItem*>PyMem_Malloc(self.cost.size * sizeof(PriorityQueueItem))
+        self.size = 0
 
         # initialize queue with targets
         for i in range(targets.shape[0]):
             # add to heap
-            x = targets[i, 0]
-            y = targets[i, 1]
-            c = cost[x, y]
-            self.heap[i] = PriorityQueueItem(x, y, c)
-            self.indices[x, y] = i
+            x = targets[i, 0] + 1
+            y = targets[i, 1] + 1
+            c = self.cost[x, y]
+            if self.cost[x, y] == np.inf:
+                continue
+            self.heap[self.size] = PriorityQueueItem(x, y, c)
+            self.indices[x, y] = self.size
             self.distance[x, y] = c
-            bubble_up(self.heap, self.indices, i)
+            self.size += 1
+            bubble_up(self.heap, self.indices, self.arity, self.size - 1)
 
 
     def __dealloc__(self):
         PyMem_Free(self.heap)
 
-    @boundscheck(False)
-    @wraparound(False)
     cpdef get_path(self, (float, float) source, int limit=0, int max_distance=1):
         """
 
@@ -122,52 +196,18 @@ cdef class DijkstraOutput:
             The lowest cost path from source to any of the targets.
 
         """
-        cdef Py_ssize_t x, y, x0, y0
+        cdef INDEX_t x, y, x0, y0, i, j
         path = list[tuple[int, int]]()
-        x0, y0 = self.get_closest_reachable_point(source, max_distance=max_distance)
+        i, j = self.get_closest_reachable_point(source, max_distance=max_distance)
 
-        # check that source is within bounds
-        if x0 < 0 or y0 < 0 or x0 >= self.distance.shape[0] or y0 >= self.distance.shape[1] or self.cost[x0+1, y0+1] == np.inf:
-            return [(x0, y0)]
+        x0 = i + 1
+        y0 = j + 1
+        if x0 < 0 or y0 < 0 or x0 >= self.distance.shape[0] or y0 >= self.distance.shape[1]:
+            return [(i, j)]
+        if self.cost[x0, y0] == np.inf:
+            return [(i, j)]
 
-        while self.size != 0 and self.heap[0].distance < self.distance[x0, y0]:
-            # dequeue
-            x = self.heap[0].x
-            y = self.heap[0].y
-            d = self.heap[0].distance
-            self.indices[x, y] = -1
-            self.size -= 1
-            self.heap[0] = self.heap[self.size]
-            self.indices[self.heap[0].x, self.heap[0].y] = 0
-            bubble_down(self.heap, self.indices, self.size, 0)
-            if d > self.distance[x, y]:
-                continue
-            for k in range(8):
-                x2 = x + NEIGHBOURS_X[k]
-                y2 = y + NEIGHBOURS_Y[k]
-                if self.cost[x2+1, y2+1] == np.inf:
-                    continue
-                alternative = self.distance[x, y] + NEIGHBOURS_D[k] * self.cost[x2+1, y2+1]
-                if alternative < self.distance[x2, y2]:
-                    self.distance[x2, y2] = alternative
-                    self.forward_x[x2, y2] = x
-                    self.forward_y[x2, y2] = y
-                    if self.indices[x2, y2] != -1:
-                        # decrease_key
-                        self.heap[self.indices[x2, y2]].distance = alternative
-                        bubble_up(self.heap, self.indices, self.indices[x2, y2])
-                    else:
-                        # enqueue
-                        self.size += 1
-                        if self.size > self.capacity:
-                            self.capacity *= HEAP_ARITY
-                            new_heap = <PriorityQueueItem*>PyMem_Realloc(self.heap, self.capacity * sizeof(PriorityQueueItem))
-                            if not new_heap:
-                                raise MemoryError()
-                            self.heap = new_heap
-                        self.heap[self.size - 1] = PriorityQueueItem(x2, y2, alternative)
-                        self.indices[x2, y2] = self.size - 1
-                        bubble_up(self.heap, self.indices, self.size - 1)
+        self.size = dijkstra_core(self.heap, self.indices, self.arity, self.size, x0, y0, self.distance, self.cost, self.forward_x, self.forward_y)
 
         if limit == 0:
             # set a fallback limit to be safe
@@ -180,13 +220,11 @@ cdef class DijkstraOutput:
             if x < 0 or y < 0:
                 # pointer value of -1 marks no pointer
                 break
-            path.append((x, y))
+            path.append((x - 1, y - 1))
             x, y = self.forward_x[x, y], self.forward_y[x, y]
         return path
 
-    @boundscheck(False)
-    @wraparound(False)
-    cpdef (Py_ssize_t, Py_ssize_t) get_closest_reachable_point(self, (float, float) source, int max_distance):
+    cpdef (INDEX_t, INDEX_t) get_closest_reachable_point(self, (float, float) source, int max_distance):
         """
 
         Search the region for a point that can reach a target.
@@ -204,17 +242,17 @@ cdef class DijkstraOutput:
             The closest integer coordinates to the source with finite distance.
 
         """
-        cdef Py_ssize_t x0 = <Py_ssize_t>(source[0] + 0.5)
-        cdef Py_ssize_t y0 = <Py_ssize_t>(source[1] + 0.5)
-        cdef Py_ssize_t x_min = x0
-        cdef Py_ssize_t y_min = y0
+        cdef INDEX_t x0 = <INDEX_t>round(source[0])
+        cdef INDEX_t y0 = <INDEX_t>round(source[1])
+        cdef INDEX_t x_min = x0
+        cdef INDEX_t y_min = y0
         cdef DTYPE_t min_distance_squared = np.inf
         cdef DTYPE_t distance_squared = np.inf
-        cdef Py_ssize_t x
-        cdef Py_ssize_t y
+        cdef INDEX_t x
+        cdef INDEX_t y
 
-        for x in range(max(0, x0 - max_distance), min(self.distance.shape[0], x0 + max_distance + 1)):
-            for y in range(max(0, y0 - max_distance), min(self.distance.shape[1], y0 + max_distance + 1)):
+        for x in range(max(0, x0 - max_distance), min(self.distance.shape[0] - 2, x0 + max_distance + 1)):
+            for y in range(max(0, y0 - max_distance), min(self.distance.shape[1] - 2, y0 + max_distance + 1)):
                 if self.cost[x+1, y+1] != np.inf:
                     distance_squared = (x - source[0]) ** 2 + (y - source[1]) ** 2
                     if distance_squared < min_distance_squared:
@@ -225,11 +263,9 @@ cdef class DijkstraOutput:
         return x_min, y_min
 
 
-@boundscheck(False)
-@wraparound(False)
 cpdef DijkstraOutput cy_dijkstra(
     DTYPE_t[:, :] cost,
-    Py_ssize_t[:, :] targets,
+    INDEX_t[:, :] targets,
     bint checks_enabled = True,
 ):
     """
