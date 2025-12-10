@@ -17,33 +17,37 @@ ctypedef Py_ssize_t INDEX_t
 # Constants
 cdef DTYPE_t SQRT2 = 1.4142135623730951
 
-cdef struct PriorityQueueItem:
-    INDEX_t index      # Flattened index (x * width + y)
-    DTYPE_t distance
-
 # -----------------------------------------------------------------------------
-# Heap Operations (Inlined & Flattened)
+# Heap Operations (Split Arrays / Structure of Arrays)
 # -----------------------------------------------------------------------------
 
 cdef inline void swap(
-    PriorityQueueItem* heap,
+    INDEX_t* heap_indices,
+    DTYPE_t* heap_distances,
     INDEX_t* indices_ptr,
     INDEX_t i,
     INDEX_t j,
 ) noexcept nogil:
-    """Swaps two items in the heap and updates their lookup indices."""
-    cdef PriorityQueueItem item_i = heap[j]
-    cdef PriorityQueueItem item_j = heap[i]
+    """Swaps items in the parallel heap arrays and updates lookup indices."""
+    cdef INDEX_t idx_i = heap_indices[i]
+    cdef DTYPE_t dist_i = heap_distances[i]
 
-    heap[i] = item_i
-    heap[j] = item_j
+    cdef INDEX_t idx_j = heap_indices[j]
+    cdef DTYPE_t dist_j = heap_distances[j]
 
-    # Update the lookup table (flat index access)
-    indices_ptr[item_i.index] = i
-    indices_ptr[item_j.index] = j
+    heap_indices[i] = idx_j
+    heap_distances[i] = dist_j
+
+    heap_indices[j] = idx_i
+    heap_distances[j] = dist_i
+
+    # Update the lookup table: flat_index -> heap_position
+    indices_ptr[idx_i] = j
+    indices_ptr[idx_j] = i
 
 cdef inline void bubble_up(
-    PriorityQueueItem* heap,
+    INDEX_t* heap_indices,
+    DTYPE_t* heap_distances,
     INDEX_t* indices_ptr,
     INDEX_t index
 ) noexcept nogil:
@@ -51,19 +55,20 @@ cdef inline void bubble_up(
     while index != 0:
         # Bitwise shift for division by 4 (arity)
         parent = (index - 1) >> 2
-        if heap[index].distance < heap[parent].distance:
-            swap(heap, indices_ptr, index, parent)
+        if heap_distances[index] < heap_distances[parent]:
+            swap(heap_indices, heap_distances, indices_ptr, index, parent)
             index = parent
         else:
             break
 
 cdef inline void bubble_down(
-    PriorityQueueItem* heap,
+    INDEX_t* heap_indices,
+    DTYPE_t* heap_distances,
     INDEX_t* indices_ptr,
     INDEX_t index,
     INDEX_t size,
 ) noexcept nogil:
-    cdef INDEX_t child, child0, next_idx, limit
+    cdef INDEX_t child, child0, next_idx
     while True:
         next_idx = index
         # Bitwise shift for multiplication by 4
@@ -71,26 +76,26 @@ cdef inline void bubble_down(
 
         # Unrolled check for children (Arity 4)
         if child0 < size:
-            if heap[child0].distance < heap[next_idx].distance:
+            if heap_distances[child0] < heap_distances[next_idx]:
                 next_idx = child0
 
             child = child0 + 1
             if child < size:
-                if heap[child].distance < heap[next_idx].distance:
+                if heap_distances[child] < heap_distances[next_idx]:
                     next_idx = child
 
                 child = child0 + 2
                 if child < size:
-                    if heap[child].distance < heap[next_idx].distance:
+                    if heap_distances[child] < heap_distances[next_idx]:
                         next_idx = child
 
                     child = child0 + 3
                     if child < size:
-                        if heap[child].distance < heap[next_idx].distance:
+                        if heap_distances[child] < heap_distances[next_idx]:
                             next_idx = child
 
         if next_idx != index:
-            swap(heap, indices_ptr, index, next_idx)
+            swap(heap_indices, heap_distances, indices_ptr, index, next_idx)
             index = next_idx
         else:
             break
@@ -100,15 +105,16 @@ cdef inline void bubble_down(
 # -----------------------------------------------------------------------------
 
 cdef INDEX_t dijkstra_core(
-    PriorityQueueItem* heap,
-    INDEX_t* indices_ptr,     # Flat pointer to indices array
+    INDEX_t* heap_indices,    # Parallel heap array 1
+    DTYPE_t* heap_distances,  # Parallel heap array 2
+    INDEX_t* indices_ptr,     # Flat pointer to indices lookup array
     INDEX_t size,
-    INDEX_t start_flat_index, # Flat index of start node
-    DTYPE_t* dist_ptr,        # Flat pointer to distance array
-    DTYPE_t* cost_ptr,        # Flat pointer to cost array
-    INDEX_t* pred_ptr,        # Flat pointer to predecessors array
-    INDEX_t total_pixels,     # Safety limit
-    INDEX_t stride            # Row width for neighbor calc
+    INDEX_t start_flat_index,
+    DTYPE_t* dist_ptr,
+    DTYPE_t* cost_ptr,
+    INDEX_t* pred_ptr,
+    INDEX_t total_pixels,
+    INDEX_t stride
 ) noexcept nogil:
 
     cdef:
@@ -120,28 +126,29 @@ cdef INDEX_t dijkstra_core(
         DTYPE_t[8] step_costs
 
     # Setup neighbor lookup tables based on image width (stride)
-    # N, S, W, E
     offsets[0] = -stride;    step_costs[0] = 1.0
     offsets[1] = stride;     step_costs[1] = 1.0
     offsets[2] = -1;         step_costs[2] = 1.0
     offsets[3] = 1;          step_costs[3] = 1.0
-    # Diagonals
     offsets[4] = -stride - 1; step_costs[4] = SQRT2
     offsets[5] = -stride + 1; step_costs[5] = SQRT2
     offsets[6] = stride - 1;  step_costs[6] = SQRT2
     offsets[7] = stride + 1;  step_costs[7] = SQRT2
 
-    while size > 0 and heap[0].distance < dist_ptr[start_flat_index]:
+    while size > 0 and heap_distances[0] < dist_ptr[start_flat_index]:
         # 1. Pop Min
-        curr_idx = heap[0].index
-        d = heap[0].distance
+        curr_idx = heap_indices[0]
+        d = heap_distances[0]
 
-        # Remove from heap
+        # Remove from heap: replace root with last element
         indices_ptr[curr_idx] = -1
         size -= 1
-        heap[0] = heap[size]
-        indices_ptr[heap[0].index] = 0
-        bubble_down(heap, indices_ptr, 0, size)
+
+        if size > 0:
+            heap_indices[0] = heap_indices[size]
+            heap_distances[0] = heap_distances[size]
+            indices_ptr[heap_indices[0]] = 0
+            bubble_down(heap_indices, heap_distances, indices_ptr, 0, size)
 
         if d > dist_ptr[curr_idx]:
             continue
@@ -150,29 +157,26 @@ cdef INDEX_t dijkstra_core(
         for k in range(8):
             neighbor_idx = curr_idx + offsets[k]
 
-            # Note: We rely on the padding (inf cost) to handle boundaries safely.
-            # We never process a neighbor if its cost is INF.
-
             alternative = d + step_costs[k] * cost_ptr[neighbor_idx]
 
             if alternative < dist_ptr[neighbor_idx]:
                 dist_ptr[neighbor_idx] = alternative
-                pred_ptr[neighbor_idx] = curr_idx # Store flat parent index
+                pred_ptr[neighbor_idx] = curr_idx
 
                 if indices_ptr[neighbor_idx] != -1:
                     # Decrease Key
-                    heap[indices_ptr[neighbor_idx]].distance = alternative
-                    bubble_up(heap, indices_ptr, indices_ptr[neighbor_idx])
+                    heap_distances[indices_ptr[neighbor_idx]] = alternative
+                    bubble_up(heap_indices, heap_distances, indices_ptr, indices_ptr[neighbor_idx])
                 else:
                     # Insert
                     if size >= total_pixels:
-                        return size # Should not happen with valid logic
+                        return size # Should not happen
 
-                    heap[size].index = neighbor_idx
-                    heap[size].distance = alternative
+                    heap_indices[size] = neighbor_idx
+                    heap_distances[size] = alternative
                     indices_ptr[neighbor_idx] = size
                     size += 1
-                    bubble_up(heap, indices_ptr, size - 1)
+                    bubble_up(heap_indices, heap_distances, indices_ptr, size - 1)
 
     return size
 
@@ -184,22 +188,24 @@ cdef class DijkstraOutput:
     cdef public INDEX_t[:, ::1] predecessors
     cdef public DTYPE_t[:, ::1] distance
 
-    # Internal raw pointers for speed
-    cdef PriorityQueueItem* heap
+    # Internal raw pointers for parallel arrays
+    cdef INDEX_t* heap_indices
+    cdef DTYPE_t* heap_distances
+
     cdef DTYPE_t[:, ::1] cost
     cdef INDEX_t[:, ::1] indices
     cdef INDEX_t size
     cdef INDEX_t width
 
     def __cinit__(self,
-                  DTYPE_t[:, :] cost, # Require C-contiguous
+                  DTYPE_t[:, :] cost,
                   INDEX_t[:, :] targets):
         cdef:
             INDEX_t x, y, flat_idx
             DTYPE_t c
             INDEX_t n_targets = targets.shape[0]
 
-        # Pad the cost array with infinity to handle boundary checks implicitly
+        # Pad the cost array with infinity
         self.cost = np.ascontiguousarray(np.pad(cost, 1, "constant", constant_values=INFINITY))
         self.width = self.cost.shape[1]
 
@@ -208,9 +214,14 @@ cdef class DijkstraOutput:
         self.indices = np.full_like(self.cost, -1, dtype=np.intp)
         self.distance = np.full_like(self.cost, INFINITY, dtype=np.float64)
 
-        # Heap allocation
+        # Heap allocation (Structure of Arrays)
         cdef INDEX_t total_pixels = self.cost.shape[0] * self.cost.shape[1]
-        self.heap = <PriorityQueueItem*>PyMem_Malloc(total_pixels * sizeof(PriorityQueueItem))
+        self.heap_indices = <INDEX_t*>PyMem_Malloc(total_pixels * sizeof(INDEX_t))
+        self.heap_distances = <DTYPE_t*>PyMem_Malloc(total_pixels * sizeof(DTYPE_t))
+
+        if not self.heap_indices or not self.heap_distances:
+            raise MemoryError()
+
         self.size = 0
 
         # Get raw pointers for initialization
@@ -228,17 +239,19 @@ cdef class DijkstraOutput:
             if c == INFINITY:
                 continue
 
-            self.heap[self.size].index = flat_idx
-            self.heap[self.size].distance = c
+            self.heap_indices[self.size] = flat_idx
+            self.heap_distances[self.size] = c
 
             indices_ptr[flat_idx] = self.size
             dist_ptr[flat_idx] = c
             self.size += 1
-            bubble_up(self.heap, indices_ptr, self.size - 1)
+            bubble_up(self.heap_indices, self.heap_distances, indices_ptr, self.size - 1)
 
     def __dealloc__(self):
-        if self.heap is not NULL:
-            PyMem_Free(self.heap)
+        if self.heap_indices is not NULL:
+            PyMem_Free(self.heap_indices)
+        if self.heap_distances is not NULL:
+            PyMem_Free(self.heap_distances)
 
     cpdef get_path(self, (float, float) source, int limit=0, int max_distance=1):
         cdef INDEX_t i, j, x0, y0, flat_idx
@@ -260,9 +273,9 @@ cdef class DijkstraOutput:
         flat_idx = x0 * self.width + y0
 
         # Run Dijkstra Core
-        # Pass pointers to the first element (&arr[0,0])
         self.size = dijkstra_core(
-            self.heap,
+            self.heap_indices,
+            self.heap_distances,
             &self.indices[0, 0],
             self.size,
             flat_idx,
@@ -276,23 +289,21 @@ cdef class DijkstraOutput:
         if limit == 0:
             limit = self.distance.size
 
-        # Reconstruct path from flattened predecessors
+        # Reconstruct path
         path = []
         cdef INDEX_t curr_flat = flat_idx
         cdef INDEX_t next_flat
         cdef INDEX_t px, py
 
         while len(path) < limit:
-            # Convert flat index back to user coordinates (removing padding)
             px = (curr_flat // self.width) - 1
             py = (curr_flat % self.width) - 1
 
-            if px < 0 or py < 0: # Should be caught by -1 check below, but safety
+            if px < 0 or py < 0:
                  break
 
             path.append((px, py))
 
-            # FAST POINTER ACCESS
             next_flat = pred_ptr[curr_flat]
             if next_flat == -1:
                 break
@@ -309,7 +320,6 @@ cdef class DijkstraOutput:
         cdef DTYPE_t distance_squared
         cdef INDEX_t x, y
 
-        # Bounds for loop
         cdef INDEX_t x_start = max(0, x0 - max_distance)
         cdef INDEX_t x_end = min(self.distance.shape[0] - 2, x0 + max_distance + 1)
         cdef INDEX_t y_start = max(0, y0 - max_distance)
@@ -333,6 +343,4 @@ cpdef DijkstraOutput cy_dijkstra(
     if checks_enabled:
         if np.any(np.less_equal(cost, 0.0)):
             raise Exception("invalid cost: entries must be strictly positive")
-        # Bounds checks skipped for brevity, similar to original
-
     return DijkstraOutput(cost, targets)
